@@ -160,49 +160,150 @@ retriever = Neo4jSubgraphRetriever(driver)#建立 Neo4jSubgraphRetriever 物件�
 def extract_entities_and_subgraph(data: TextQueryRequest):
     prompt = f"""
 你是一個「嚴格字串抽取器（strict extract-only）」系統。
-任務：僅從文字中抽取明確出現的【實體】：
-- 食材：文字中逐字出現的具體食材名詞
-- 食譜名稱：文字中逐字出現的料理名稱
-- 步驟：文字中逐字出現的操作或烹飪步驟
-規則：
-1. 不得推測或生成文字中不存在的詞。
-2. 只有當文字同時出現「食材 + 食譜名稱」時，才生成關係 edge
+
+任務：僅從文字中抽取【明確逐字出現】的實體與關係。
+
+【可抽取的實體類型】
+1. 食材：
+   - 文字中逐字出現的具體食材名詞
+   - 例如：洋蔥、胡蘿蔔、雞胸肉
+
+2. 不喜歡的食材：
+   - 使用者明確表達厭惡、不吃、排斥的食材
+   -- 僅限以下語意明確的表達：
+    【厭惡／不吃】
+   - 「不喜歡 X」
+   - 「討厭 X」
+   - 「不吃 X」
+   - 「不想吃 X」
+
+   【明確排除】
+   - 「不要 X」
+   - 「不要包含 X」
+   - 「不包含 X」
+   - 「排除 X」
+
+   - X 必須是文字中逐字出現的食材名稱
+   - 不得推測或擴展
+
+3. 食譜名稱：
+   - 文字中逐字出現的料理名稱
+
+4. 步驟：
+   - 文字中逐字出現的操作或烹飪動作
+   - 例如：切、揉、攪拌、煮、炒
+
+【關係抽取規則】
+1. 只有在文字中同時出現：
+   - 「食材 + 食譜名稱」
+   才可建立關係：
+   {{
+     "from": "食材",
+     "to": "食譜名稱",
+     "relation": "可以做"
+   }}
+
+2. 若文字中出現「不喜歡的食材（厭惡或排除）」，必須建立關係：
+
+   - 若使用的語句屬於【厭惡／不吃】：
+     （不喜歡 X、討厭 X、不吃 X、不想吃 X）
+     則：
+     {{
+       "from": "使用者",
+       "to": "X",
+       "relation": "討厭"
+     }}
+
+   - 若使用的語句屬於【明確排除】：
+     （不要 X、不要包含 X、不包含 X、排除 X）
+     則：
+     {{
+       "from": "使用者",
+       "to": "X",
+       "relation": "排除"
+     }}
+     - 若同一排除或厭惡語句中，使用「和」、「以及」、「、」、「&」、「跟」連接多個食材，
+       必須將每一個食材分別建立獨立關係 edge。
+
+
+3. 若無符合條件的關係，edges 必須為空陣列 []
+
+【嚴格規則】
+- 不得推測、補齊、概括、改寫原文
+- 只允許抽取原文逐字出現的詞
+- 若沒有任何符合條件的實體，nodes 輸出 []
+
 =================
 【文字】
 "{data.text}"
-==================
-請輸出 JSON：
+=================
+
+【輸出格式（嚴格遵守，不可多字）】
 {{
   "nodes": [
     {{ "name": "..." }}
   ],
-  "edges": []
+  "edges": [
+    {{
+      "from": "...",
+      "to": "...",
+      "relation": "..."
+    }}
+  ]
 }}
+
+請輸出 JSON:
 """
-    os.environ["PATH"] += r";C:\Users\user\AppData\Local\Programs\Ollama" #確保系統能找到 Ollama 執行檔
-    response = generate( #使用本地的 Ollama LLM 來生成回應
+    # ------------------- 呼叫 Ollama LLM -------------------
+    os.environ["PATH"] += r";C:\Users\user\AppData\Local\Programs\Ollama"
+    response = generate(
         model="gemma3:4b",
-        system="你是一個 JSON API，只能輸出 JSON，禁止輸出任何說明。", #系統提示，引導模型只輸出 JSON，不要多餘文字
+        system="你是一個 JSON API，只能輸出 JSON，禁止輸出任何說明。",
         prompt=prompt,
-        options={"temperature": 0, "top_p": 0}
+        options={"temperature": 0, "top_p": 0} #生成方式參數:溫度0、top_p 0，確保不會額外生成文字
     )
+
     raw = response["response"]
-    match = re.search(r"\{[\s\S]*\}", raw) #用正則表達式抓出第一個大括號包住的JSON 物件 
-    #\{ 開頭，\} 結尾。[\s\S]* 表示任意字元（包括換行）。
+    match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
         return {"nodes": [], "edges": [], "subgraph": []}
-    #match.group(0) → 正則抓到的完整 JSON 字串  json.loads(...) → 解析成 Python dictionary，
-    data_json = json.loads(match.group(0)) #將正則抓到的字串轉成 Python dict
-    node_names = [n["name"] for n in data_json.get("nodes", [])]#從 JSON 中提取每個node的name
 
-    # 抓子圖
+    # ------------------- 解析 LLM JSON -------------------
+    data_json = json.loads(match.group(0))
+    node_names = [n["name"] for n in data_json.get("nodes", [])]
+
+    # ------------------- 過濾掉使用者不喜歡 / 排除的食材 -------------------
+    exclude_ingredients = {
+        edge["to"] for edge in data_json.get("edges", [])
+        if edge.get("relation") in ["排除", "討厭"]
+    }
+
+    if exclude_ingredients:
+        query_exclude = """
+        MATCH (r:Recipe)-[:HAS_INGREDIENT]->(i:Ingredient)
+        WHERE i.name IN $exclude
+        RETURN DISTINCT r.name AS recipe_name
+        """
+        with driver.session() as session:
+            excluded_recipes = [record["recipe_name"] for record in session.run(
+                query_exclude, {"exclude": list(exclude_ingredients)}
+            )]
+        node_names = [n for n in node_names if n not in excluded_recipes]
+
+    # ------------------- 抓子圖 -------------------
     paths = retriever.get_subgraph_by_nodes(node_names, hops=data.hops, limit=data.limit)
-    subgraph = []
-    for path in paths:
-        subgraph.append([node["name"] for node in path.nodes])
+    readable_subgraph = []
 
+    for path in paths:
+        for rel in path.relationships:
+            start = rel.start_node["name"]
+            end = rel.end_node["name"]
+            relation = rel.type  # 使用 Neo4j 的關係名稱
+            readable_subgraph.append(f"{start} → {relation} → {end}") #我改成了我們看得懂的樣子
+
+    # ------------------- 回傳 -------------------
     return {
         "nodes": node_names,
         "edges": data_json.get("edges", []),
-        "subgraph": subgraph
+        "subgraph": readable_subgraph
     }
