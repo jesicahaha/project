@@ -161,7 +161,7 @@ for edge in data.get("edges", []):
             "relation": relation
         })
 
-# 🔴 print 一定要在 for 迴圈外
+# print 一定要在 for 迴圈外
 print("test1 nodes:", nodes_list)
 print("test1 edges:", edges_list)
 print("-" * 50)
