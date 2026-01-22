@@ -1,0 +1,79 @@
+<h2>使用者討厭食物</h2>
+<form id="dislikeForm"> 
+    <label>使用者 ID：</label><br>
+    <p>目前登入使用者：<b>{{username}}</b></p>
+    <label>討厭的食物：</label><br>
+    <input type="text" id="ingredient" placeholder="例如：牛肉"><br><br>
+    <button type="button" onclick="submitForm()">送出</button>
+</form>
+
+<hr>
+
+<h2>手動輸入菜名抓取 TheMealDB 食譜</h2>
+<label>菜名：</label><br>
+<input type="text" id="mealName" placeholder="例如：Arrabiata"><br><br>
+<button type="button" onclick="fetchMeal()">抓取並存入 Neo4j</button>
+
+<hr>
+
+<h2>輸入問題抓取實體並抓子圖</h2>
+<label>問題文字：</label><br>
+<textarea id="queryText" rows="3" cols="50" placeholder="例如：我已經準備了洋蔥、胡蘿蔔和馬鈴薯，接下來可以做什麼？"></textarea><br><br>
+<button type="button" onclick="extractEntities()">抽取實體 + 抓子圖</button>
+
+<hr>
+
+<script>
+function submitForm() {
+    fetch('/user/dislike', { //使用 Fetch API 發送 HTTP 請求
+        method: 'POST', 
+        headers: {'Content-Type': 'application/json'}, //Content-Type: application/json 告訴後端，這個請求的 body 是 JSON
+        body: JSON.stringify({//JSON.stringify(...) 將 JavaScript 物件轉成 JSON 字串
+            ingredient: document.getElementById('ingredient').value//從 HTML 頁面抓 <input id="ingredient"> 的值
+        })
+    })
+    .then(res => {//用 .then() 處理回傳的 Response 物件，res 是 HTTP 回應物件
+        if (!res.ok) throw new Error("未登入或儲存失敗");
+        return res.json();
+    })
+    .then(() => {
+        document.getElementById('ingredient').value = "";//清空輸入框，使用者輸入的值重置為空字串
+        alert("已成功儲存");//用 alert 顯示後端回傳訊息給使用者
+    })
+    .catch(err => {//捕捉任何錯誤（HTTP 錯誤或程式執行錯誤）
+        alert(err.message);
+    });
+}
+
+function fetchMeal() {
+    const mealName = document.getElementById('mealName').value;
+    if (!mealName) { alert("請輸入菜名"); return; }
+
+    fetch('/recipe_from_mealdb', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ meal_name: mealName })
+    })
+    .then(res => res.json())
+    .then(data => {
+        alert(data.message);
+        document.getElementById('mealName').value = "";
+    });
+}
+
+// ------------------- 抽取實體 + 抓子圖 -------------------
+function extractEntities() {
+    const text = document.getElementById('queryText').value;
+    if (!text) { alert("請輸入文字"); return; }
+
+    fetch('/extract_entities', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ text })
+    })
+    .then(res => res.json())
+    .then(data => {
+        alert("抽取節點：" + JSON.stringify(data.nodes) + "\n子圖節點：" + JSON.stringify(data.subgraph));
+    });
+}
+</script>
