@@ -54,31 +54,6 @@ def add_dislike(request: Request, data: DislikeRequest):
 
     return {"status": "ok"}
 
-# ------------------- TheMealDB 抓食譜 -------------------
-def fetch_mealdb_recipe(meal_name: str) -> dict:#-> dict(回傳值型別註解):表示函式會回傳一個 Python 字典（dict
-    url = f"https://www.themealdb.com/api/json/v1/1/search.php?s={meal_name}"
-    res = requests.get(url)#發送 HTTP GET 請求
-    if res.status_code != 200:
-        return {}
-    data = res.json()
-    if not data.get("meals"):
-        return {}
-    meal = data["meals"][0]
-
-    ingredients = []
-    for i in range(1, 21):
-        ing = meal.get(f"strIngredient{i}") #存食材名稱
-        measure = meal.get(f"strMeasure{i}") #存食材用量
-        if ing and ing.strip(): #若食材名稱存在且非空白，ing.strip()：去掉字串前後空白
-            ingredients.append(f"{ing.strip()} ({measure.strip() if measure else ''})")#如果 measure 有值就去掉前後空白。如果 measure 是 None，就用空字串。
-
-    return {
-        "recipe_name": meal.get("strMeal", "未知"),
-        "ingredients": ingredients,
-        "cuisine": meal.get("strArea", "未知"),
-        "cooking_method": meal.get("strInstructions", "")
-    }
-
 # ------------------- 存食譜到 Neo4j -------------------
 def save_recipe_to_graph(data):
     #UNWIND 的作用：把列表拆開，逐個處理
@@ -108,20 +83,6 @@ def save_recipe_to_graph(data):
         print(f"Saved recipe: {data['recipe_name']}")
     except Exception as e:
         print("Neo4j save error:", e)
-
-# ------------------- 背景任務 -------------------
-def save_mealdb_recipe_background(meal_name: str):
-    recipe = fetch_mealdb_recipe(meal_name)
-    if recipe and recipe.get("recipe_name"): #有資料才寫入圖資料庫
-        save_recipe_to_graph(recipe)
-
-class MealRequest(BaseModel):
-    meal_name: str
-
-@app.post("/recipe_from_mealdb")
-def add_recipe_from_mealdb(data: MealRequest, background_tasks: BackgroundTasks):
-    background_tasks.add_task(save_mealdb_recipe_background, data.meal_name)
-    return {"status": "processing", "message": f"食譜 {data.meal_name} 正在存入 Neo4j"}
 
 # ------------------- LLM 抽實體 + Neo4j子圖 -------------------
 class TextQueryRequest(BaseModel):
@@ -265,6 +226,7 @@ def extract_entities_and_subgraph(data: TextQueryRequest):
 
     raw = response["response"]
     match = re.search(r"\{[\s\S]*\}", raw)
+
     if not match:
         return {"nodes": [], "edges": [], "subgraph": []}
 
@@ -272,26 +234,33 @@ def extract_entities_and_subgraph(data: TextQueryRequest):
     data_json = json.loads(match.group(0))
     node_names = [n["name"] for n in data_json.get("nodes", [])]
 
-    # ------------------- 過濾掉使用者不喜歡 / 排除的食材 -------------------
-    exclude_ingredients = {
-        edge["to"] for edge in data_json.get("edges", [])
-        if edge.get("relation") in ["排除", "討厭"]
+    # ------------------- 過濾掉使用者不喜歡 / 排除的節點 -------------------
+    exclude_nodes = {
+    edge.get("to") for edge in data_json.get("edges", [])
+    if edge.get("relation") in ["排除", "討厭"] and edge.get("to")
     }
 
-    if exclude_ingredients:
+    # 查 Neo4j，把這些節點對應的食譜也刪掉
+    if exclude_nodes:
         query_exclude = """
         MATCH (r:Recipe)-[:HAS_INGREDIENT]->(i:Ingredient)
-        WHERE i.name IN $exclude
+        WHERE r.name IN $exclude OR i.name IN $exclude
         RETURN DISTINCT r.name AS recipe_name
         """
         with driver.session() as session:
             excluded_recipes = [record["recipe_name"] for record in session.run(
-                query_exclude, {"exclude": list(exclude_ingredients)}
+                query_exclude, {"exclude": list(exclude_nodes)}
             )]
-        node_names = [n for n in node_names if n not in excluded_recipes]
+    else:
+        excluded_recipes = []
 
-    # ------------------- 抓子圖 -------------------
-    paths = retriever.get_subgraph_by_nodes(node_names, hops=data.hops, limit=data.limit)
+    # 篩選子圖起點：排除掉被使用者不喜歡的食譜 / 食材
+    filtered_nodes = [n for n in node_names if n not in excluded_recipes and n not in exclude_nodes]
+
+
+    # 抓子圖
+    paths = retriever.get_subgraph_by_nodes(filtered_nodes, hops=data.hops, limit=data.limit)
+
     readable_subgraph = []
 
     for path in paths:
@@ -303,7 +272,7 @@ def extract_entities_and_subgraph(data: TextQueryRequest):
 
     # ------------------- 回傳 -------------------
     return {
-        "nodes": node_names,
-        "edges": data_json.get("edges", []),
-        "subgraph": readable_subgraph
+    "nodes": filtered_nodes,  # <-- 這裡改成 filtered_nodes
+    "edges": data_json.get("edges", []),
+    "subgraph": readable_subgraph
     }
