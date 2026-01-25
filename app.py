@@ -256,7 +256,14 @@ def extract_entities_and_subgraph(data: TextQueryRequest):
 
     # 篩選子圖起點：排除掉被使用者不喜歡的食譜 / 食材
     filtered_nodes = [n for n in node_names if n not in excluded_recipes and n not in exclude_nodes]
-
+    '''目前抓子圖的方式:
+node_names 是 LLM 抽出來的節點（食材、食譜名稱、步驟等）
+把關係是討厭或排除的節點存到exclude_nodes
+之後到neo4j找1.食譜名稱在 exclude_nodes 中的食譜2.食材在 exclude_nodes 中的食譜
+把結果存成 excluded_recipes
+之後filtered_nodes=node_names-exclude_nodes
+filtered_nodes就是要搜尋的節點
+'''
 
     # 抓子圖
     paths = retriever.get_subgraph_by_nodes(filtered_nodes, hops=data.hops, limit=data.limit)
