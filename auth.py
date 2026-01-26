@@ -46,7 +46,7 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
     request.session["username"] = username
     return RedirectResponse("/dashboard", status_code=303)
 
-@router.get("/logout")
+@router.get("/logout")#還沒用到 之後改
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/")
